@@ -81,25 +81,111 @@ export class CarparkService {
 
   /**
    * Retrieves carpark list.
-   * NOTE FOR BACKEND INTEGRATION:
-   * Replace this mock data retrieval with your API call, e.g.:
-   * const res = await fetch('/api/carparks/availability');
-   * return await res.json();
+   * Calls the /api/carparkavailability serverless function.
+   * If LTA_DATAMALL_KEY is present, live lots from LTA's CarParkAvailabilityv2
+   * are integrated directly. Otherwise falls back gracefully to the offline store.
    */
-  public async fetchCarparks(): Promise<Carpark[]> {
-    return [...this.carparks];
+  public async fetchCarparks(customAccountKey?: string): Promise<{
+    carparks: Carpark[];
+    isLiveConnected: boolean;
+    errorReason?: string;
+  }> {
+    try {
+      const headers: Record<string, string> = { accept: 'application/json' };
+      if (customAccountKey) {
+        headers['accountkey'] = customAccountKey;
+      }
+
+      const res = await fetch('/api/carparkavailability', { headers });
+      if (res.ok) {
+        const json = await res.json();
+        if (json.value && Array.isArray(json.value)) {
+          this.mergeLtaData(json.value);
+          return { carparks: [...this.carparks], isLiveConnected: true };
+        }
+      } else if (res.status === 401) {
+        return {
+          carparks: [...this.carparks],
+          isLiveConnected: false,
+          errorReason: 'LTA_DATAMALL_KEY not set yet',
+        };
+      }
+    } catch (err: any) {
+      console.warn('Live LTA API connection failed, using local feed:', err);
+    }
+
+    return { carparks: [...this.carparks], isLiveConnected: false };
+  }
+
+  /**
+   * Merges real-time LTA DataMall values into the active carpark store
+   */
+  private mergeLtaData(ltaItems: any[]) {
+    // Map LTA items by Development or CarParkID
+    const ltaMap = new Map<string, any>();
+    ltaItems.forEach((item) => {
+      if (item.CarParkID) ltaMap.set(String(item.CarParkID).toLowerCase(), item);
+      if (item.Development) ltaMap.set(String(item.Development).toLowerCase(), item);
+    });
+
+    this.carparks = this.carparks.map((cp) => {
+      // Find matching LTA record by id or development name
+      const matched =
+        ltaMap.get(cp.id.toLowerCase()) ||
+        ltaMap.get(cp.carpark_number.toLowerCase()) ||
+        Array.from(ltaMap.values()).find(
+          (item) =>
+            cp.name.toLowerCase().includes(item.Development?.toLowerCase()) ||
+            item.Development?.toLowerCase().includes(cp.area?.toLowerCase())
+        );
+
+      if (matched && typeof matched.AvailableLots === 'number') {
+        const liveAvail = matched.AvailableLots;
+        const total = cp.lots_summary.total;
+        const updatedBreakdown = cp.lots_summary.breakdown.map((b) =>
+          b.type === 'C' ? { ...b, available: liveAvail } : b
+        );
+        return {
+          ...cp,
+          lots_summary: {
+            ...cp.lots_summary,
+            available: liveAvail,
+            breakdown: updatedBreakdown,
+          },
+          occupancy_status: computeOccupancyStatus(liveAvail, total),
+          last_updated: 'Live from LTA DataMall',
+        };
+      }
+      return cp;
+    });
+  }
+
+  /**
+   * Refreshes availability. If live LTA endpoint is connected, pulls fresh data.
+   * Otherwise simulates gantry fluctuation.
+   */
+  public async refreshAvailability(customAccountKey?: string): Promise<{
+    carparks: Carpark[];
+    isLiveConnected: boolean;
+  }> {
+    const result = await this.fetchCarparks(customAccountKey);
+    if (result.isLiveConnected) {
+      return result;
+    }
+
+    // Fallback simulation when key is not yet added
+    const simulated = this.simulateLiveRefresh();
+    return { carparks: simulated, isLiveConnected: false };
   }
 
   /**
    * Simulates real-time lot fluctuation (e.g. cars entering/exiting gantries).
-   * In a live backend setup, this calls the live LTA DataMall / data.gov.sg Carpark Availability API.
    */
   public simulateLiveRefresh(): Carpark[] {
     this.carparks = this.carparks.map((cp) => {
       // Simulate minor fluctuation (-5 to +5 lots)
       const delta = Math.floor(Math.random() * 9) - 4;
       const carLot = cp.lots_summary.breakdown.find((b) => b.type === 'C');
-      const motoLot = cp.lots_summary.breakdown.find((b) => b.type === 'Y');
 
       let newCarAvail = (carLot ? carLot.available : cp.lots_summary.available) + delta;
       if (carLot) {

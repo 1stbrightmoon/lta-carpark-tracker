@@ -48,8 +48,11 @@ export default function App() {
 
   // Load initial carparks
   useEffect(() => {
-    carparkService.fetchCarparks().then((data) => {
-      setCarparks(data);
+    carparkService.fetchCarparks().then((res) => {
+      setCarparks(res.carparks);
+      if (res.isLiveConnected) {
+        setLastUpdatedTime('Live LTA DataMall');
+      }
     });
   }, []);
 
@@ -64,15 +67,17 @@ export default function App() {
     }
   }, [darkMode]);
 
-  // Handle refresh simulation
-  const handleRefresh = () => {
+  // Handle refresh
+  const handleRefresh = async () => {
     setIsRefreshing(true);
-    setTimeout(() => {
-      const updated = carparkService.simulateLiveRefresh();
-      setCarparks(updated);
-      setLastUpdatedTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-      setIsRefreshing(false);
-    }, 600);
+    const res = await carparkService.refreshAvailability();
+    setCarparks(res.carparks);
+    setLastUpdatedTime(
+      res.isLiveConnected
+        ? 'Live LTA DataMall'
+        : new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    );
+    setIsRefreshing(false);
   };
 
   // Toggle favorite
